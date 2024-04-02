@@ -26,8 +26,8 @@ import (
 	"github.com/sigstore/sigstore/pkg/signature"
 )
 
-func NewSigner(ctx context.Context, ko options.KeyOpts, signer signature.SignerVerifier) (*fulcio.Signer, error) {
-	fs, err := fulcio.NewSigner(ctx, ko, signer)
+func NewSigner(ctx context.Context, ko options.KeyOpts, signer signature.SignerVerifier) (*[]fulcio.Signer, error) {
+	fs_list, err := fulcio.NewSigner(ctx, ko, signer)
 	if err != nil {
 		return nil, err
 	}
@@ -38,11 +38,16 @@ func NewSigner(ctx context.Context, ko options.KeyOpts, signer signature.SignerV
 		return nil, fmt.Errorf("getting CTFE public keys: %w", err)
 	}
 
-	// verify the sct
-	if err := cosign.VerifySCT(ctx, fs.Cert, fs.Chain, fs.SCT, pubKeys); err != nil {
-		return nil, fmt.Errorf("verifying SCT: %w", err)
-	}
-	ui.Infof(ctx, "Successfully verified SCT...")
+	fsReturn := []fulcio.Signer{}
+	for _, fs := range *fs_list {
+		// verify the sct
+		if err := cosign.VerifySCT(ctx, fs.Cert, fs.Chain, fs.SCT, pubKeys); err != nil {
+			return nil, fmt.Errorf("verifying SCT: %w", err)
+		}
+		ui.Infof(ctx, "Successfully verified SCT...")
 
-	return fs, nil
+		fsReturn = append(fsReturn, fs)
+	}
+
+	return &fsReturn, nil
 }

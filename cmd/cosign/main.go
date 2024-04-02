@@ -33,6 +33,7 @@ import (
 	_ "github.com/sigstore/sigstore/pkg/signature/kms/hashivault"
 )
 
+
 func main() {
 	// Fix up flags to POSIX standard flags.
 	ctx := context.Background()

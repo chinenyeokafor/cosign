@@ -536,38 +536,47 @@ func signerFromNewKey() (*SignerVerifier, error) {
 	}, nil
 }
 
-func keylessSigner(ctx context.Context, ko options.KeyOpts, sv *SignerVerifier) (*SignerVerifier, error) {
+func keylessSigner(ctx context.Context, ko options.KeyOpts, sv *SignerVerifier) (*[]SignerVerifier, error) {
+	fmt.Println("keylesssigner is called")
 	var (
-		k   *fulcio.Signer
-		err error
+		k_list *[]fulcio.Signer
+		err    error
 	)
 
 	if ko.InsecureSkipFulcioVerify {
-		if k, err = fulcio.NewSigner(ctx, ko, sv); err != nil {
+		fmt.Println(" in ko.InsecureSkipFulcioVerify")
+		if k_list, err = fulcio.NewSigner(ctx, ko, sv); err != nil {
+			fmt.Println(" in ko.InsecureSkipFulcioVerify  after if k_list")
 			return nil, fmt.Errorf("getting key from Fulcio: %w", err)
 		}
 	} else {
-		if k, err = fulcioverifier.NewSigner(ctx, ko, sv); err != nil {
+		if k_list, err = fulcioverifier.NewSigner(ctx, ko, sv); err != nil {
 			return nil, fmt.Errorf("getting key from Fulcio: %w", err)
 		}
+		fmt.Println(" empty else")
 	}
 
-	return &SignerVerifier{
-		Cert:           k.Cert,
-		Chain:          k.Chain,
-		SignerVerifier: k,
-	}, nil
+	return_lists := []SignerVerifier{}
+	for _, k := range *k_list {
+		return_lists = append(return_lists, SignerVerifier{
+			Cert:           k.Cert,
+			Chain:          k.Chain,
+			SignerVerifier: &k,
+		})
+	}
+	return &return_lists, nil
 }
 
 func SignerFromKeyOpts(ctx context.Context, certPath string, certChainPath string, ko options.KeyOpts) (*SignerVerifier, error) {
+	fmt.Println("project sign SignerFromKeyOpts is called")
 	var sv *SignerVerifier
 	var err error
 	genKey := false
 	switch {
-	case ko.Sk:
-		sv, err = signerFromSecurityKey(ctx, ko.Slot)
-	case ko.KeyRef != "":
-		sv, err = signerFromKeyRef(ctx, certPath, certChainPath, ko.KeyRef, ko.PassFunc)
+	// case ko.Sk:
+	// 	sv, err = signerFromSecurityKey(ctx, ko.Slot)
+	// case ko.KeyRef != "":
+	// 	sv, err = signerFromKeyRef(ctx, certPath, certChainPath, ko.KeyRef, ko.PassFunc)
 	default:
 		genKey = true
 		ui.Infof(ctx, "Generating ephemeral keys...")
@@ -578,9 +587,16 @@ func SignerFromKeyOpts(ctx context.Context, certPath string, certChainPath strin
 	}
 
 	if ko.IssueCertificateForExistingKey || genKey {
-		return keylessSigner(ctx, ko, sv)
-	}
+		svLists, err := keylessSigner(ctx, ko, sv)
+		if err != nil {
+			fmt.Println("Error:", err)
+			return nil, nil
+		}
+		//TODO: Check if cert.Subject match and all cert validity. for now just use first cert
+		svFirst := &((*svLists)[0])
+		return svFirst, nil
 
+	}
 	return sv, nil
 }
 
