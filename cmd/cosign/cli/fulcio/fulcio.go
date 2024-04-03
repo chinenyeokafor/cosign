@@ -19,10 +19,16 @@ import (
 	"context"
 	"crypto"
 	"crypto/x509"
+	"encoding/pem"
+	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
+
+	"sigstore/pkg/oauthflow"
 
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
 	"github.com/sigstore/cosign/v2/cmd/cosign/cli/sign/privacy"
@@ -31,7 +37,6 @@ import (
 	"github.com/sigstore/cosign/v2/pkg/providers"
 	"github.com/sigstore/fulcio/pkg/api"
 	"github.com/sigstore/sigstore/pkg/cryptoutils"
-	"github.com/sigstore/sigstore/pkg/oauthflow"
 	"github.com/sigstore/sigstore/pkg/signature"
 	"go.step.sm/crypto/jose"
 	"golang.org/x/term"
@@ -45,22 +50,66 @@ const (
 )
 
 type oidcConnector interface {
-	OIDConnect(string, string, string, string) (*oauthflow.OIDCIDToken, error)
+	OIDConnect(string, string, string, string) (*[]oauthflow.OIDCIDToken, error)
 }
 
 type realConnector struct {
 	flow oauthflow.TokenGetter
 }
 
-func (rf *realConnector) OIDConnect(url, clientID, secret, redirectURL string) (*oauthflow.OIDCIDToken, error) {
+func (rf *realConnector) OIDConnect(url, clientID, secret, redirectURL string) (*[]oauthflow.OIDCIDToken, error) {
+	fmt.Println("project fulcio OIDConnect  is called")
 	return oauthflow.OIDConnect(url, clientID, secret, redirectURL, rf.flow)
 }
 
+func checkCert(CertPEM []byte) []byte {
+	clientPEM, _ := pem.Decode(CertPEM)
+	cert, err := x509.ParseCertificate(clientPEM.Bytes)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Create a temporary file to write the certificate data
+	tmpfile, err := os.CreateTemp("", "cert*.pem")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer os.Remove(tmpfile.Name()) // clean up
+
+	// Write the certificate data to the temporary file
+	if err := pem.Encode(tmpfile, &pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}); err != nil {
+		log.Fatal(err)
+	}
+
+	// Run the openssl x509 command to view the certificate
+	cmd := exec.Command("openssl", "x509", "-in", tmpfile.Name(), "-text", "-noout")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return out
+}
+
 func getCertForOauthID(sv signature.SignerVerifier, fc api.LegacyClient, connector oidcConnector, oidcIssuer, oidcClientID, oidcClientSecret, oidcRedirectURL string) (*api.CertificateResponse, error) {
-	tok, err := connector.OIDConnect(oidcIssuer, oidcClientID, oidcClientSecret, oidcRedirectURL)
+	toks, err := connector.OIDConnect(oidcIssuer, oidcClientID, oidcClientSecret, oidcRedirectURL)
 	if err != nil {
 		return nil, err
 	}
+
+	desiredSubject := (*toks)[0].Subject
+	var tokRawString []string
+
+	// Iterate over each token
+	for _, tok := range *toks {
+		// Compare the Subject field of the token with the desired pattern
+		if tok.Subject != desiredSubject {
+			// Handle the case where the Subject doesn't match the desired pattern
+			return nil, errors.New("Subject from all tokens does not match")
+		}
+		tokRawString = append(tokRawString, tok.RawString)
+	}
+	concatTokRawString := strings.Join(tokRawString, ",")
 
 	publicKey, err := sv.PublicKey()
 	if err != nil {
@@ -71,7 +120,7 @@ func getCertForOauthID(sv signature.SignerVerifier, fc api.LegacyClient, connect
 		return nil, err
 	}
 	// Sign the email address as part of the request
-	proof, err := sv.SignMessage(strings.NewReader(tok.Subject))
+	proof, err := sv.SignMessage(strings.NewReader(desiredSubject))
 	if err != nil {
 		return nil, err
 	}
@@ -83,21 +132,21 @@ func getCertForOauthID(sv signature.SignerVerifier, fc api.LegacyClient, connect
 		SignedEmailAddress: proof,
 	}
 
-	return fc.SigningCert(cr, tok.RawString)
+	return fc.SigningCert(cr, concatTokRawString)
 }
 
 // GetCert returns the PEM-encoded signature of the OIDC identity returned as part of an interactive oauth2 flow plus the PEM-encoded cert chain.
 func GetCert(_ context.Context, sv signature.SignerVerifier, idToken, flow, oidcIssuer, oidcClientID, oidcClientSecret, oidcRedirectURL string, fClient api.LegacyClient) (*api.CertificateResponse, error) {
 	c := &realConnector{}
 	switch flow {
-	case flowClientCredentials:
-		c.flow = oauthflow.NewClientCredentialsFlow(oidcIssuer)
-	case flowDevice:
-		c.flow = oauthflow.NewDeviceFlowTokenGetterForIssuer(oidcIssuer)
+	// case flowClientCredentials:
+	// 	c.flow = oauthflow.NewClientCredentialsFlow(oidcIssuer)
+	// case flowDevice:
+	// 	c.flow = oauthflow.NewDeviceFlowTokenGetterForIssuer(oidcIssuer)
 	case flowNormal:
 		c.flow = oauthflow.DefaultIDTokenGetter
-	case flowToken:
-		c.flow = &oauthflow.StaticTokenGetter{RawToken: idToken}
+	// case flowToken:
+	// c.flow = &oauthflow.StaticTokenGetter{RawToken: idToken}
 	default:
 		return nil, fmt.Errorf("unsupported oauth flow: %s", flow)
 	}
@@ -178,7 +227,7 @@ func NewSigner(ctx context.Context, ko options.KeyOpts, signer signature.SignerV
 		Chain:          Resp.ChainPEM,
 		SCT:            Resp.SCT,
 	}
-
+	log.Println("this is cert for provider: ", string(checkCert(Resp.CertPEM)))
 	return f, nil
 }
 
